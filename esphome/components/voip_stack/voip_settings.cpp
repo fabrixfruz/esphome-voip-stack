@@ -423,6 +423,15 @@ bool VoipStack::apply_roster_json_contacts_(const std::string &roster_json) {
   JsonRosterSlot ha_slot;
   bool has_ha = false;
   bool saw_valid_slot = false;
+  // Se piu' voci del roster portano local_ha:true contemporaneamente (caso
+  // normale: HA marca cosi' OGNI endpoint che ospita, non solo uno), senza
+  // questa preferenza esplicita vince semplicemente l'ultima trovata
+  // nell'array - un ordine che puo' cambiare tra una ricezione e l'altra e
+  // produce una scelta instabile/imprevedibile del peer HA di fallback.
+  // Una voce con questo nome, se presente, ha sempre la precedenza; se
+  // assente, il comportamento resta quello originale (ultima vince) per
+  // non alterare installazioni che non usano questa convenzione di nome.
+  static constexpr const char *PREFERRED_HA_PEER_NAME = "Reception";
 
   const cJSON *item = nullptr;
   cJSON_ArrayForEach(item, contacts) {
@@ -433,8 +442,12 @@ bool VoipStack::apply_roster_json_contacts_(const std::string &roster_json) {
     if (slot.name == this->device_name_ || slot.name == this->device_route_id_) continue;
     slots.push_back(slot);
     if (slot.local_ha && !slot.address.empty()) {
-      ha_slot = slot;
-      has_ha = true;
+      const bool is_preferred = (slot.name == PREFERRED_HA_PEER_NAME);
+      const bool current_is_preferred = has_ha && (ha_slot.name == PREFERRED_HA_PEER_NAME);
+      if (!has_ha || is_preferred || !current_is_preferred) {
+        ha_slot = slot;
+        has_ha = true;
+      }
     }
   }
   cJSON_Delete(root);
