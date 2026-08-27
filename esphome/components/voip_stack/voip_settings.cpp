@@ -442,10 +442,19 @@ bool VoipStack::apply_roster_json_contacts_(const std::string &roster_json) {
     saw_valid_slot = true;
     if (slot.name == this->device_name_ || slot.name == this->device_route_id_) continue;
     slots.push_back(slot);
-    ESP_LOGI(TAG, "DEBUG: slot name='%s' local_ha=%d address='%s'", slot.name.c_str(),
-             (int) slot.local_ha, slot.address.c_str());
-    if (slot.local_ha && !slot.address.empty()) {
-      const bool is_preferred = (slot.name == PREFERRED_HA_PEER_NAME);
+    ESP_LOGI(TAG, "DEBUG: slot name='%s' local_ha=%d address='%s' sip_port=%u rtp_port=%u",
+             slot.name.c_str(), (int) slot.local_ha, slot.address.c_str(),
+             (unsigned) slot.sip_port, (unsigned) slot.rtp_port);
+    // "Reception" (l'endpoint virtuale della pipeline Assist) NON porta
+    // local_ha:true ne' un indirizzo nel roster - a differenza dei
+    // softphone numerati, il suo instradamento avviene lato HA verso lo
+    // stesso indirizzo SIP fisso, non tramite l'indirizzo per-contatto.
+    // Un match per nome deve quindi essere un candidato valido di per se',
+    // indipendentemente da local_ha/indirizzo - altrimenti "Reception"
+    // viene scartato prima ancora di essere considerato come preferenza.
+    const bool is_preferred = (slot.name == PREFERRED_HA_PEER_NAME);
+    const bool is_ha_candidate = slot.local_ha && !slot.address.empty();
+    if (is_preferred || is_ha_candidate) {
       const bool current_is_preferred = has_ha && (ha_slot.name == PREFERRED_HA_PEER_NAME);
       if (!has_ha || is_preferred || !current_is_preferred) {
         ha_slot = slot;
