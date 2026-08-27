@@ -500,7 +500,6 @@ void VoipStack::fire_timeout_decline_() {
 
 void VoipStack::dump_config() {
   ESP_LOGCONFIG(TAG, "VoIP Stack:");
-  ESP_LOGCONFIG(TAG, "  *** MARKER-2026-08-26-PATCH-TEST ***");
   if (this->transport_) {
     ESP_LOGCONFIG(TAG, "  Transport: %s", this->transport_->transport_name());
   } else {
