@@ -445,7 +445,6 @@ bool VoipStack::apply_roster_json_contacts_(const std::string &roster_json) {
   bool saw_preferred_name = false;
 
   const cJSON *item = nullptr;
-  ESP_LOGI(TAG, "DEBUG: parsing roster JSON, %u contacts in array", (unsigned) roster_size);
   cJSON_ArrayForEach(item, contacts) {
     if (slots.size() >= Phonebook::MAX_CONTACTS) break;
     JsonRosterSlot slot;
@@ -453,17 +452,12 @@ bool VoipStack::apply_roster_json_contacts_(const std::string &roster_json) {
     saw_valid_slot = true;
     if (slot.name == this->device_name_ || slot.name == this->device_route_id_) continue;
     slots.push_back(slot);
-    ESP_LOGI(TAG, "DEBUG: slot name='%s' local_ha=%d address='%s' sip_port=%u rtp_port=%u",
-             slot.name.c_str(), (int) slot.local_ha, slot.address.c_str(),
-             (unsigned) slot.sip_port, (unsigned) slot.rtp_port);
     if (slot.name == PREFERRED_HA_PEER_NAME) saw_preferred_name = true;
     if (slot.local_ha && !slot.address.empty()) {
       ha_slot = slot;
       has_ha = true;
     }
   }
-  ESP_LOGI(TAG, "DEBUG: after loop has_ha=%d anchor='%s' saw_preferred=%d", (int) has_ha,
-           has_ha ? ha_slot.name.c_str() : "(none)", (int) saw_preferred_name);
   cJSON_Delete(root);
   if (slots.empty()) {
     // An authoritative empty roster (or one containing only this device)
