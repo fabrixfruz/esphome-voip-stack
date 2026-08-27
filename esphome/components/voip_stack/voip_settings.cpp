@@ -423,15 +423,26 @@ bool VoipStack::apply_roster_json_contacts_(const std::string &roster_json) {
   JsonRosterSlot ha_slot;
   bool has_ha = false;
   bool saw_valid_slot = false;
-  // Se piu' voci del roster portano local_ha:true contemporaneamente (caso
-  // normale: HA marca cosi' OGNI endpoint che ospita, non solo uno), senza
-  // questa preferenza esplicita vince semplicemente l'ultima trovata
-  // nell'array - un ordine che puo' cambiare tra una ricezione e l'altra e
-  // produce una scelta instabile/imprevedibile del peer HA di fallback.
-  // Una voce con questo nome, se presente, ha sempre la precedenza; se
-  // assente, il comportamento resta quello originale (ultima vince) per
-  // non alterare installazioni che non usano questa convenzione di nome.
+  // "ha_slot" resta l'ancora TECNICA di indirizzo/porta usata per instradare
+  // tutti i contatti "via HA" (compreso eventualmente "Reception" stesso,
+  // che non ha un indirizzo proprio) - deve percio' essere scelta SOLO tra
+  // contatti con local_ha:true e indirizzo reale, esattamente come nel
+  // comportamento originale. Renderla uguale al contatto preferito (se
+  // quello non ha un indirizzo proprio, vedi "Reception") creerebbe un
+  // riferimento circolare: la voce di rubrica di quel contatto proverebbe a
+  // instradarsi tramite se stessa, con indirizzo vuoto, e verrebbe scartata
+  // (osservato: contatti configurati sceso da 7 a 6, chiamata a "Reception"
+  // fallita con "not in local phonebook").
+  //
+  // Il NOME preferito da ricordare come "ha_peer_name_" e' invece una
+  // questione separata, puramente di preferenza: se una voce con questo
+  // nome esiste nel roster (anche senza local_ha/indirizzo propri, come
+  // "Reception"), il nome vince sempre sugli altri candidati - ma la sua
+  // eventuale voce di rubrica continuera' ad instradarsi tramite l'ancora
+  // ha_slot (un contatto diverso, con indirizzo reale), non tramite se
+  // stessa.
   static constexpr const char *PREFERRED_HA_PEER_NAME = "Reception";
+  bool saw_preferred_name = false;
 
   const cJSON *item = nullptr;
   ESP_LOGI(TAG, "DEBUG: parsing roster JSON, %u contacts in array", (unsigned) roster_size);
@@ -445,27 +456,14 @@ bool VoipStack::apply_roster_json_contacts_(const std::string &roster_json) {
     ESP_LOGI(TAG, "DEBUG: slot name='%s' local_ha=%d address='%s' sip_port=%u rtp_port=%u",
              slot.name.c_str(), (int) slot.local_ha, slot.address.c_str(),
              (unsigned) slot.sip_port, (unsigned) slot.rtp_port);
-    // "Reception" (l'endpoint virtuale della pipeline Assist) NON porta
-    // local_ha:true ne' un indirizzo nel roster - a differenza dei
-    // softphone numerati, il suo instradamento avviene lato HA verso lo
-    // stesso indirizzo SIP fisso, non tramite l'indirizzo per-contatto.
-    // Un match per nome deve quindi essere un candidato valido di per se',
-    // indipendentemente da local_ha/indirizzo - altrimenti "Reception"
-    // viene scartato prima ancora di essere considerato come preferenza.
-    const bool is_preferred = (slot.name == PREFERRED_HA_PEER_NAME);
-    const bool is_ha_candidate = slot.local_ha && !slot.address.empty();
-    if (is_preferred || is_ha_candidate) {
-      const bool current_is_preferred = has_ha && (ha_slot.name == PREFERRED_HA_PEER_NAME);
-      if (!has_ha || is_preferred || !current_is_preferred) {
-        ha_slot = slot;
-        has_ha = true;
-        ESP_LOGI(TAG, "DEBUG: ha_slot now set to '%s' (is_preferred=%d)", slot.name.c_str(),
-                 (int) is_preferred);
-      }
+    if (slot.name == PREFERRED_HA_PEER_NAME) saw_preferred_name = true;
+    if (slot.local_ha && !slot.address.empty()) {
+      ha_slot = slot;
+      has_ha = true;
     }
   }
-  ESP_LOGI(TAG, "DEBUG: after loop has_ha=%d final_pick='%s'", (int) has_ha,
-           has_ha ? ha_slot.name.c_str() : "(none)");
+  ESP_LOGI(TAG, "DEBUG: after loop has_ha=%d anchor='%s' saw_preferred=%d", (int) has_ha,
+           has_ha ? ha_slot.name.c_str() : "(none)", (int) saw_preferred_name);
   cJSON_Delete(root);
   if (slots.empty()) {
     // An authoritative empty roster (or one containing only this device)
@@ -477,8 +475,10 @@ bool VoipStack::apply_roster_json_contacts_(const std::string &roster_json) {
     return false;
   }
 
-  if (has_ha && this->ha_peer_name_ != ha_slot.name) {
-    this->ha_peer_name_ = ha_slot.name;
+  const std::string preferred_peer_name =
+      saw_preferred_name ? std::string(PREFERRED_HA_PEER_NAME) : ha_slot.name;
+  if (has_ha && this->ha_peer_name_ != preferred_peer_name) {
+    this->ha_peer_name_ = preferred_peer_name;
     ESP_LOGI(TAG, "HA peer name learned from roster JSON: %s", this->ha_peer_name_.c_str());
   }
 
