@@ -904,6 +904,12 @@ async def to_code(config):
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)
 
+    # voip_settings.cpp parses/builds SIP roster JSON with cJSON directly
+    # (esphome uses ArduinoJson elsewhere, so ESP-IDF's own "json" component
+    # is excluded from the build by default). Re-include it so cJSON.h
+    # resolves and the generated src/CMakeLists.txt REQUIRES it.
+    esp32.include_builtin_idf_component("json")
+
     await _add_core_settings(var, config)
     _add_transport_settings(var, config)
     await _add_device_and_audio_settings(var, config)
