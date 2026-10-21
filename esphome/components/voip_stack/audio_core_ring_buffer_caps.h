@@ -46,6 +46,15 @@ enum class RingBufferPolicy {
 /// destructor is not virtual, so deleting a derived buffer through
 /// std::unique_ptr<RingBuffer> would be undefined behaviour even though the
 /// derived object has no additional fields.
+///
+/// Compatibility note (ESPHome ring_buffer with static handle):
+/// the base class no longer stores a RingbufHandle_t field. handle_() is now a
+/// method returning &structure_, because xRingbufferCreateStatic() returns the
+/// static structure itself as the handle. The base destructor uses storage_ as
+/// its "installed" gate (storage_ != nullptr -> vRingbufferDelete + free with
+/// RAMAllocator). Since our storage comes from heap_caps_malloc(), this class
+/// must release it itself and leave storage_ == nullptr so that the base
+/// destructor does nothing (no double delete, no free with the wrong allocator).
 class CapsRingBuffer : public ring_buffer::RingBuffer {
  public:
   ~CapsRingBuffer();
@@ -97,11 +106,11 @@ inline const char *policy_str(RingBufferPolicy p) {
 }  // namespace detail
 
 inline CapsRingBuffer::~CapsRingBuffer() {
-  if (this->handle_ != nullptr) {
-    vRingbufferDelete(this->handle_);
+  // storage_ != nullptr  <=>  the ring was created successfully in install().
+  if (this->storage_ != nullptr) {
+    vRingbufferDelete(this->handle_());
     heap_caps_free(this->storage_);
-    this->handle_ = nullptr;
-    this->storage_ = nullptr;
+    this->storage_ = nullptr;  // base destructor must find nothing to release
     this->size_ = 0;
   }
 }
@@ -113,8 +122,9 @@ inline bool CapsRingBuffer::install(size_t len, uint32_t caps, RingbufferType_t 
   this->storage_ = mem;
   this->size_ = len;
   this->type_ = type;
-  this->handle_ = xRingbufferCreateStatic(len, type, mem, &this->structure_);
-  if (this->handle_ == nullptr) {
+  // xRingbufferCreateStatic() returns &structure_ on success, NULL if the
+  // arguments are rejected; handle_() relies on the former.
+  if (xRingbufferCreateStatic(len, type, mem, &this->structure_) != this->handle_()) {
     heap_caps_free(mem);
     this->storage_ = nullptr;
     this->size_ = 0;
