@@ -32,6 +32,11 @@ static constexpr size_t MAX_SIP_TCP_RX_BUFFER = 8192;
 static constexpr uint32_t SIP_T1_MS = 500;
 static constexpr uint32_t SIP_T2_MS = 4000;
 static constexpr uint32_t SIP_TRANSACTION_TIMEOUT_MS = 64 * SIP_T1_MS;
+// Once the peer answered 180/183 the call is only ringing: the application
+// level calling/ringing timeout (e.g. 90 s) decides when to give up and sends
+// CANCEL. This bound only stops a peer that rings and then disappears, so it
+// must stay above that application timeout.
+static constexpr uint32_t SIP_INVITE_PROCEEDING_TIMEOUT_MS = 120000;
 
 std::string sip_header_token(const std::string &raw, size_t max_bytes = VOIP_STACK_MAX_REASON_LEN);
 
@@ -2333,6 +2338,10 @@ bool SipTransport::handle_response_(const std::string &message, const sockaddr_i
       // Keep the bounded transaction until its original 64*T1 deadline so a
       // peer that sends 100/180 and then disappears cannot strand the call.
       this->pending_invite_.completed = true;
+      if (status > 100) {
+        // 180/183: do not end a ringing call at 64*T1 (32 s).
+        this->pending_invite_.deadline_ms = millis() + SIP_INVITE_PROCEEDING_TIMEOUT_MS;
+      }
       this->pending_invite_.next_ms = this->pending_invite_.deadline_ms;
     } else {
       this->clear_invite_transaction_();
