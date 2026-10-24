@@ -171,9 +171,9 @@ bool VoipStack::allocate_setup_buffers_() {
     }
   }
 
-  if (this->has_microphone_() && this->dc_offset_removal_) {
+  if (this->has_microphone_() && (this->dc_offset_removal_ || this->mic_highpass_hz_ > 0.0f)) {
     if (this->tx_audio_format_.pcm_format != PcmFormat::S16LE) {
-      ESP_LOGE(TAG, "dc_offset_removal requires voip_stack.audio.tx.pcm_format: s16le");
+      ESP_LOGE(TAG, "dc_offset_removal / mic_highpass_hz require voip_stack.audio.tx.pcm_format: s16le");
       return false;
     }
     if (!this->ensure_mic_processing_buffer_()) {
@@ -511,6 +511,9 @@ void VoipStack::dump_config() {
   ESP_LOGCONFIG(TAG, "  HA peer name: %s", this->ha_peer_name_.c_str());
   ESP_LOGCONFIG(TAG, "  Audio capability: %s", this->audio_capability_());
   ESP_LOGCONFIG(TAG, "  HA as first contact: %s", YESNO(this->use_ha_as_first_contact_));
+  ESP_LOGCONFIG(TAG, "  RX DSP: %s", YESNO(this->rx_dsp_.enabled()));
+  ESP_LOGCONFIG(TAG, "  Mic high-pass: %.0f Hz", this->mic_highpass_hz_);
+  ESP_LOGCONFIG(TAG, "  Auto volume: %s", YESNO(this->auto_volume_enabled_));
   ESP_LOGCONFIG(TAG, "  Phonebook source: HA SIP phonebook");
 #ifdef USE_ESPHOME_VOIP_STACK_MIC
   ESP_LOGCONFIG(TAG, "  Microphone: %s", this->microphone_ ? "direct" : (this->microphone_source_ ? "source" : "none"));
