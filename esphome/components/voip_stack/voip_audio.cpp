@@ -273,6 +273,7 @@ void VoipStack::update_ambient_noise_(const uint8_t *data, size_t len) {
   const uint32_t now = millis();
   if (this->last_mic_cb_ms_ == 0 || now - this->last_mic_cb_ms_ > 1000) {
     this->noise_phase_ = 0;
+    this->rx_audible_.store(false, std::memory_order_relaxed);
     this->rx_dsp_.reset();
     this->mic_hpf_.reset();
   }
@@ -281,11 +282,15 @@ void VoipStack::update_ambient_noise_(const uint8_t *data, size_t len) {
   if (this->noise_phase_ == 2)
     return;
 
+  // Si ascolta finche' il peer non fa sentire audio udibile (rx_audible_):
+  // con Reception la chiamata viene risposta quasi subito, ma il primo
+  // parlato arriva piu' tardi, e fino ad allora l'altoparlante e' muto.
   const CallState st = this->call_state_.load(std::memory_order_acquire);
-  const bool pre_answer =
-      st == CallState::CALLING || st == CallState::REMOTE_RINGING || st == CallState::CONNECTING;
+  const bool listening = (st == CallState::CALLING || st == CallState::REMOTE_RINGING ||
+                          st == CallState::CONNECTING || st == CallState::IN_CALL) &&
+                         !this->rx_audible_.load(std::memory_order_relaxed);
 
-  if (pre_answer) {
+  if (listening) {
     if (this->noise_phase_ == 0) {
       this->noise_meter_.begin(this->get_current_tx_audio_format_().sample_rate);
       this->noise_phase_ = 1;
@@ -295,7 +300,7 @@ void VoipStack::update_ambient_noise_(const uint8_t *data, size_t len) {
       this->finalize_ambient_noise_();
     }
   } else if (this->noise_phase_ == 1) {
-    // La chiamata e' stata risposta prima di riempire la finestra: usa quello
+    // Il peer ha iniziato a parlare prima di riempire la finestra: usa quello
     // che c'e' (se e' abbastanza), altrimenti resta il valore precedente.
     this->finalize_ambient_noise_();
   }
@@ -452,6 +457,18 @@ void VoipStack::rx_task_() {
       // an unconditional delay after a successful write double-paces playout
       // and lets the RTP queue grow until audible gaps appear.
       const size_t frame_bytes = rx_format.nominal_frame_bytes();
+      if (this->auto_volume_enabled_ && !this->rx_audible_.load(std::memory_order_relaxed) &&
+          rx_format.pcm_format == PcmFormat::S16LE) {
+        // Picco > ~-30 dBFS: e' parlato vero (non i frame di silenzio iniziali).
+        const int16_t *pcm16 = reinterpret_cast<const int16_t *>(this->rx_audio_chunk_);
+        const size_t n = frame_bytes / sizeof(int16_t);
+        for (size_t i = 0; i < n; i++) {
+          if (pcm16[i] > 1000 || pcm16[i] < -1000) {
+            this->rx_audible_.store(true, std::memory_order_relaxed);
+            break;
+          }
+        }
+      }
       if (this->rx_dsp_.enabled() && rx_format.pcm_format == PcmFormat::S16LE && rx_format.channels == 1) {
         this->rx_dsp_.prepare(rx_format.sample_rate);
         this->rx_dsp_.process(reinterpret_cast<int16_t *>(this->rx_audio_chunk_), frame_bytes / sizeof(int16_t));
