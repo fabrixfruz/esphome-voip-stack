@@ -177,6 +177,12 @@ void VoipStack::tx_task_() {
 // === Microphone Callback ===
 
 void VoipStack::on_microphone_data_(const uint8_t *data, size_t len) {
+  // Il rumore ambientale si misura PRIMA che la chiamata riceva risposta,
+  // quando l'altoparlante e' ancora muto: dopo, il microfono sentirebbe
+  // anche l'audio riprodotto.
+  if (this->auto_volume_enabled_) {
+    this->update_ambient_noise_(data, len);
+  }
   if (!this->is_tx_stream_ready_()) {
     return;
   }
@@ -216,8 +222,16 @@ void VoipStack::on_microphone_data_(const uint8_t *data, size_t len) {
   const float effective_gain = mic_converted != nullptr
       ? this->mic_gain_.load(std::memory_order_relaxed)
       : 1.0f;
+  const bool hpf_on = this->mic_highpass_hz_ > 0.0f;
+  if (hpf_on) {
+    const uint32_t fs = this->get_current_tx_audio_format_().sample_rate;
+    if (fs != this->mic_hpf_rate_) {
+      this->mic_hpf_.set_highpass(static_cast<float>(fs), this->mic_highpass_hz_);
+      this->mic_hpf_rate_ = fs;
+    }
+  }
   const bool needs_processing =
-      mic_converted != nullptr && (effective_gain != 1.0f || this->dc_offset_removal_);
+      mic_converted != nullptr && (effective_gain != 1.0f || this->dc_offset_removal_ || hpf_on);
 
   if (needs_processing) {
     const int16_t *src = reinterpret_cast<const int16_t *>(data);
@@ -227,9 +241,12 @@ void VoipStack::on_microphone_data_(const uint8_t *data, size_t len) {
     size_t off = 0;
     while (off < total_samples) {
       const size_t chunk = std::min(total_samples - off, this->mic_processing_samples_());
-      if (this->dc_offset_removal_) {
+      if (this->dc_offset_removal_ || hpf_on) {
         for (size_t i = 0; i < chunk; i++) {
-          mic_converted[i] = scale_sample(this->dc_blocker_.process(src[off + i]), effective_gain);
+          int16_t v = src[off + i];
+          if (this->dc_offset_removal_) v = this->dc_blocker_.process(v);
+          if (hpf_on) v = voip_dsp::clamp_i16(this->mic_hpf_.process(static_cast<float>(v)));
+          mic_converted[i] = scale_sample(v, effective_gain);
         }
       } else {
         scale_block_i16(src + off, mic_converted, chunk, effective_gain);
@@ -241,6 +258,78 @@ void VoipStack::on_microphone_data_(const uint8_t *data, size_t len) {
   } else {
     this->write_mic_buffer_(data, len);
   }
+}
+
+// === Volume automatico in base al rumore ambientale ===
+
+void VoipStack::update_ambient_noise_(const uint8_t *data, size_t len) {
+  if (data == nullptr || len < sizeof(int16_t))
+    return;
+  if (this->get_current_tx_audio_format_().pcm_format != PcmFormat::S16LE)
+    return;
+
+  // Il microfono viene fermato tra una chiamata e l'altra: una pausa nei
+  // callback significa che e' iniziata una nuova sessione audio.
+  const uint32_t now = millis();
+  if (this->last_mic_cb_ms_ == 0 || now - this->last_mic_cb_ms_ > 1000) {
+    this->noise_phase_ = 0;
+    this->rx_dsp_.reset();
+    this->mic_hpf_.reset();
+  }
+  this->last_mic_cb_ms_ = now == 0 ? 1 : now;
+
+  if (this->noise_phase_ == 2)
+    return;
+
+  const CallState st = this->call_state_.load(std::memory_order_acquire);
+  const bool pre_answer =
+      st == CallState::CALLING || st == CallState::REMOTE_RINGING || st == CallState::CONNECTING;
+
+  if (pre_answer) {
+    if (this->noise_phase_ == 0) {
+      this->noise_meter_.begin(this->get_current_tx_audio_format_().sample_rate);
+      this->noise_phase_ = 1;
+    }
+    this->noise_meter_.feed(reinterpret_cast<const int16_t *>(data), len / sizeof(int16_t));
+    if (this->noise_meter_.window_full()) {
+      this->finalize_ambient_noise_();
+    }
+  } else if (this->noise_phase_ == 1) {
+    // La chiamata e' stata risposta prima di riempire la finestra: usa quello
+    // che c'e' (se e' abbastanza), altrimenti resta il valore precedente.
+    this->finalize_ambient_noise_();
+  }
+}
+
+void VoipStack::finalize_ambient_noise_() {
+  this->noise_phase_ = 2;
+  if (!this->noise_meter_.has_min_blocks()) {
+    ESP_LOGW(TAG, "Auto volume: finestra di misura troppo breve, resta l'attenuazione precedente (%.1f dB)",
+             this->auto_volume_att_db_.load(std::memory_order_relaxed));
+    return;
+  }
+  const float noise_dbfs = this->noise_meter_.result_dbfs();
+  const float span = std::max(1.0f, this->av_loud_dbfs_ - this->av_quiet_dbfs_);
+  const float t = std::max(0.0f, std::min(1.0f, (noise_dbfs - this->av_quiet_dbfs_) / span));
+  const float att_db = this->av_att_db_ * (1.0f - t);
+  this->ambient_noise_dbfs_.store(noise_dbfs, std::memory_order_relaxed);
+  this->auto_volume_att_db_.store(att_db, std::memory_order_relaxed);
+  this->apply_speaker_volume_();
+  ESP_LOGI(TAG, "Auto volume: rumore ambientale %.1f dBFS (quieto %.0f, forte %.0f) -> attenuazione %.1f dB",
+           noise_dbfs, this->av_quiet_dbfs_, this->av_loud_dbfs_, att_db);
+}
+
+void VoipStack::apply_speaker_volume_() {
+#ifdef USE_ESPHOME_VOIP_STACK_SPEAKER
+  if (this->speaker_ == nullptr)
+    return;
+  float v = this->volume_.load(std::memory_order_relaxed);
+  const float att_db = this->auto_volume_att_db_.load(std::memory_order_relaxed);
+  // L'altoparlante I2S software mappa 0..1 su 99 passi da 0,5 dB (49,5 dB totali).
+  if (att_db > 0.0f)
+    v = std::max(0.0f, v - att_db / 49.5f);
+  this->speaker_->set_volume(v);
+#endif
 }
 #endif  // USE_ESPHOME_VOIP_STACK_MIC
 
@@ -363,6 +452,10 @@ void VoipStack::rx_task_() {
       // an unconditional delay after a successful write double-paces playout
       // and lets the RTP queue grow until audible gaps appear.
       const size_t frame_bytes = rx_format.nominal_frame_bytes();
+      if (this->rx_dsp_.enabled() && rx_format.pcm_format == PcmFormat::S16LE && rx_format.channels == 1) {
+        this->rx_dsp_.prepare(rx_format.sample_rate);
+        this->rx_dsp_.process(reinterpret_cast<int16_t *>(this->rx_audio_chunk_), frame_bytes / sizeof(int16_t));
+      }
       this->play_rx_frame_(this->rx_audio_chunk_, frame_bytes, SilenceReason::NONE, frame_ticks);
     } else {
       // Initial prebuffering must stay quiet, but BUFFERING is also returned
