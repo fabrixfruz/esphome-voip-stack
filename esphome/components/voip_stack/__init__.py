@@ -25,6 +25,27 @@ _LOGGER = logging.getLogger(__name__)
 
 CONF_VOIP_STACK_ID = "voip_stack_id"
 CONF_DC_OFFSET_REMOVAL = "dc_offset_removal"
+
+# Elaborazione audio opzionale (tutto spento di default)
+CONF_RX_DSP = "rx_dsp"
+CONF_RX_HIGHPASS_HZ = "highpass_hz"
+CONF_RX_PRESENCE_HZ = "presence_hz"
+CONF_RX_PRESENCE_GAIN_DB = "presence_gain_db"
+CONF_RX_DSP_GAIN_DB = "gain_db"
+CONF_RX_LIMITER = "limiter"
+CONF_RX_LIMITER_DBFS = "limiter_dbfs"
+CONF_MIC_HIGHPASS_HZ = "mic_highpass_hz"
+CONF_AUTO_VOLUME = "auto_volume"
+CONF_AV_QUIET_DBFS = "quiet_dbfs"
+CONF_AV_LOUD_DBFS = "loud_dbfs"
+CONF_AV_QUIET_ATTENUATION_DB = "quiet_attenuation_db"
+CONF_AV_MEASURE_MS = "measure_ms"
+
+
+def _validate_auto_volume(config):
+    if config[CONF_AV_LOUD_DBFS] <= config[CONF_AV_QUIET_DBFS]:
+        raise cv.Invalid("auto_volume: loud_dbfs deve essere maggiore di quiet_dbfs")
+    return config
 CONF_TASK_STACKS_IN_PSRAM = "task_stacks_in_psram"
 CONF_BUFFERS_IN_PSRAM = "buffers_in_psram"
 CONF_MICROPHONE_SOURCE = "microphone_source"
@@ -519,6 +540,36 @@ CONFIG_SCHEMA = cv.Schema(
         cv.Optional(CONF_SPEAKER): cv.use_id(speaker.Speaker),
         # DC offset removal for mics with significant DC bias (e.g., SPH0645)
         cv.Optional(CONF_DC_OFFSET_REMOVAL, default=False): cv.boolean,
+        # Filtro/guadagno/limitatore sull'audio ricevuto (verso l'altoparlante).
+        # Utile con altoparlanti piccoli o trombe: il passa-alto toglie le basse
+        # che non riproducono, la presenza aiuta la voce sopra il rumore del
+        # traffico, il limitatore morbido evita il clipping.
+        cv.Optional(CONF_RX_DSP): cv.Schema(
+            {
+                cv.Optional(CONF_RX_HIGHPASS_HZ, default=0.0): cv.float_range(min=0.0, max=1000.0),
+                cv.Optional(CONF_RX_PRESENCE_HZ, default=2500.0): cv.float_range(min=500.0, max=3600.0),
+                cv.Optional(CONF_RX_PRESENCE_GAIN_DB, default=0.0): cv.float_range(min=-12.0, max=12.0),
+                cv.Optional(CONF_RX_DSP_GAIN_DB, default=0.0): cv.float_range(min=-12.0, max=24.0),
+                cv.Optional(CONF_RX_LIMITER, default=True): cv.boolean,
+                cv.Optional(CONF_RX_LIMITER_DBFS, default=-2.0): cv.float_range(min=-20.0, max=-0.1),
+            }
+        ),
+        # Passa-alto sul microfono (Hz, 0 = spento): toglie il rombo del traffico.
+        cv.Optional(CONF_MIC_HIGHPASS_HZ, default=0.0): cv.float_range(min=0.0, max=500.0),
+        # Volume automatico: misura il rumore ambientale mentre la chiamata
+        # squilla e attenua il volume (fino a quiet_attenuation_db) quando
+        # intorno e' silenzioso. Il volume master resta il massimo.
+        cv.Optional(CONF_AUTO_VOLUME): cv.All(
+            cv.Schema(
+                {
+                    cv.Optional(CONF_AV_QUIET_DBFS, default=-55.0): cv.float_range(min=-110.0, max=-10.0),
+                    cv.Optional(CONF_AV_LOUD_DBFS, default=-35.0): cv.float_range(min=-100.0, max=0.0),
+                    cv.Optional(CONF_AV_QUIET_ATTENUATION_DB, default=12.0): cv.float_range(min=0.0, max=40.0),
+                    cv.Optional(CONF_AV_MEASURE_MS, default=600): cv.int_range(min=100, max=3000),
+                }
+            ),
+            _validate_auto_volume,
+        ),
         # Place VoIP network task stacks in PSRAM. The TX task exists only
         # when a microphone is configured; transport/control tasks are owned by
         # the selected transport. Default false keeps stacks in internal RAM,
@@ -739,6 +790,29 @@ async def _add_core_settings(var, config):
         cg.add(var.set_speaker(spk))
 
     cg.add(var.set_dc_offset_removal(config[CONF_DC_OFFSET_REMOVAL]))
+    if CONF_RX_DSP in config:
+        dsp = config[CONF_RX_DSP]
+        cg.add(
+            var.set_rx_dsp(
+                dsp[CONF_RX_HIGHPASS_HZ],
+                dsp[CONF_RX_PRESENCE_HZ],
+                dsp[CONF_RX_PRESENCE_GAIN_DB],
+                dsp[CONF_RX_DSP_GAIN_DB],
+                dsp[CONF_RX_LIMITER],
+                dsp[CONF_RX_LIMITER_DBFS],
+            )
+        )
+    cg.add(var.set_mic_highpass_hz(config[CONF_MIC_HIGHPASS_HZ]))
+    if CONF_AUTO_VOLUME in config:
+        av = config[CONF_AUTO_VOLUME]
+        cg.add(
+            var.set_auto_volume(
+                av[CONF_AV_QUIET_DBFS],
+                av[CONF_AV_LOUD_DBFS],
+                av[CONF_AV_QUIET_ATTENUATION_DB],
+                av[CONF_AV_MEASURE_MS],
+            )
+        )
     cg.add(var.set_task_stacks_in_psram(config[CONF_TASK_STACKS_IN_PSRAM]))
     cg.add(var.set_buffers_in_psram(config[CONF_BUFFERS_IN_PSRAM]))
     cg.add(var.set_extension(config[CONF_EXTENSION]))
