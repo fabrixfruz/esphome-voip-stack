@@ -3,6 +3,7 @@
 #ifdef USE_ESP32
 
 #include "audio_core_audio_utils.h"
+#include "audio_dsp.h"
 #include "audio_core_ring_buffer_caps.h"
 #include "esphome/core/automation.h"
 #include "esphome/core/component.h"
@@ -114,6 +115,35 @@ class VoipStack : public Component {
 #endif
 
   void set_dc_offset_removal(bool enabled) { this->dc_offset_removal_ = enabled; }
+
+  // --- Elaborazione audio opzionale (tutto spento di default) ---
+  // Filtro/guadagno/limitatore sull'audio ricevuto, prima dell'altoparlante.
+  void set_rx_dsp(float highpass_hz, float presence_hz, float presence_gain_db, float gain_db, bool limiter,
+                  float limiter_dbfs) {
+    voip_dsp::RxDspConfig cfg;
+    cfg.highpass_hz = highpass_hz;
+    cfg.presence_hz = presence_hz;
+    cfg.presence_gain_db = presence_gain_db;
+    cfg.gain_db = gain_db;
+    cfg.limiter = limiter;
+    cfg.limiter_dbfs = limiter_dbfs;
+    this->rx_dsp_.set_config(cfg);
+  }
+  // Passa-alto sul microfono (toglie il rombo del traffico dall'audio trasmesso).
+  void set_mic_highpass_hz(float hz) { this->mic_highpass_hz_ = hz; }
+  // Volume automatico: misura il rumore prima che la chiamata venga risposta
+  // e attenua il volume (fino a quiet_attenuation_db) quando e' silenzioso.
+  void set_auto_volume(float quiet_dbfs, float loud_dbfs, float quiet_attenuation_db, uint32_t measure_ms) {
+    this->auto_volume_enabled_ = true;
+    this->av_quiet_dbfs_ = quiet_dbfs;
+    this->av_loud_dbfs_ = loud_dbfs;
+    this->av_att_db_ = quiet_attenuation_db;
+    this->noise_meter_.configure(200, measure_ms);
+  }
+  // Ultimo rumore ambientale misurato (dBFS RMS, NAN se mai misurato) e
+  // attenuazione applicata (dB): leggibili da lambda YAML (template sensor).
+  float get_ambient_noise_dbfs() const { return this->ambient_noise_dbfs_.load(std::memory_order_relaxed); }
+  float get_auto_volume_attenuation_db() const { return this->auto_volume_att_db_.load(std::memory_order_relaxed); }
   void set_task_stacks_in_psram(bool enabled) { this->task_stacks_in_psram_ = enabled; }
   void set_buffers_in_psram(bool enabled) { this->buffers_in_psram_ = enabled; }
   void set_device_name(const std::string &name) { this->device_name_ = name; }
@@ -747,6 +777,24 @@ class VoipStack : public Component {
 
   bool dc_offset_removal_{false};       // for mics with DC bias (SPH0645)
   bool buffers_in_psram_{false};
+
+  // --- Elaborazione audio opzionale ---
+  voip_dsp::RxDsp rx_dsp_;
+  float mic_highpass_hz_{0.0f};
+  voip_dsp::Biquad mic_hpf_;
+  uint32_t mic_hpf_rate_{0};
+  bool auto_volume_enabled_{false};
+  float av_quiet_dbfs_{-55.0f};
+  float av_loud_dbfs_{-35.0f};
+  float av_att_db_{12.0f};
+  voip_dsp::NoiseMeter noise_meter_;
+  uint8_t noise_phase_{0};          // 0 = in attesa, 1 = misura in corso, 2 = fatto per questa chiamata
+  uint32_t last_mic_cb_ms_{0};      // per riconoscere una nuova sessione del microfono
+  std::atomic<float> ambient_noise_dbfs_{NAN};
+  std::atomic<float> auto_volume_att_db_{0.0f};
+  void update_ambient_noise_(const uint8_t *data, size_t len);
+  void finalize_ambient_noise_();
+  void apply_speaker_volume_();
 #ifdef USE_ESPHOME_VOIP_STACK_MIC
   DcBlockerState dc_blocker_;
 
