@@ -790,6 +790,7 @@ class VoipStack : public Component {
   voip_dsp::NoiseMeter noise_meter_;
   uint8_t noise_phase_{0};          // 0 = in attesa, 1 = misura in corso, 2 = fatto per questa chiamata
   uint32_t last_mic_cb_ms_{0};      // per riconoscere una nuova sessione del microfono
+  std::atomic<bool> rx_audible_{false};  // vero quando dal peer arriva audio udibile (fine della finestra di misura)
   std::atomic<float> ambient_noise_dbfs_{NAN};
   std::atomic<float> auto_volume_att_db_{0.0f};
   void update_ambient_noise_(const uint8_t *data, size_t len);
