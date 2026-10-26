@@ -314,14 +314,16 @@ void VoipStack::finalize_ambient_noise_() {
     return;
   }
   const float noise_dbfs = this->noise_meter_.result_dbfs();
-  const float span = std::max(1.0f, this->av_loud_dbfs_ - this->av_quiet_dbfs_);
-  const float t = std::max(0.0f, std::min(1.0f, (noise_dbfs - this->av_quiet_dbfs_) / span));
-  const float att_db = this->av_att_db_ * (1.0f - t);
+  const float quiet_dbfs = this->av_quiet_dbfs_.load(std::memory_order_relaxed);
+  const float loud_dbfs = this->av_loud_dbfs_.load(std::memory_order_relaxed);
+  const float span = std::max(1.0f, loud_dbfs - quiet_dbfs);
+  const float t = std::max(0.0f, std::min(1.0f, (noise_dbfs - quiet_dbfs) / span));
+  const float att_db = this->av_att_db_.load(std::memory_order_relaxed) * (1.0f - t);
   this->ambient_noise_dbfs_.store(noise_dbfs, std::memory_order_relaxed);
   this->auto_volume_att_db_.store(att_db, std::memory_order_relaxed);
   this->apply_speaker_volume_();
   ESP_LOGI(TAG, "Auto volume: rumore ambientale %.1f dBFS (quieto %.0f, forte %.0f) -> attenuazione %.1f dB",
-           noise_dbfs, this->av_quiet_dbfs_, this->av_loud_dbfs_, att_db);
+           noise_dbfs, quiet_dbfs, loud_dbfs, att_db);
 }
 
 void VoipStack::apply_speaker_volume_() {

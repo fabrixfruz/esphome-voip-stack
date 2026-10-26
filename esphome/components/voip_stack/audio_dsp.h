@@ -10,6 +10,7 @@
 // voip_stack resta identico a prima.
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -102,13 +103,22 @@ class RxDsp {
   void set_config(const RxDspConfig &cfg) {
     this->cfg_ = cfg;
     this->rate_ = 0;  // forza il ricalcolo dei coefficienti
-    this->gain_lin_ = std::pow(10.0f, cfg.gain_db / 20.0f);
+    this->gain_lin_.store(std::pow(10.0f, cfg.gain_db / 20.0f), std::memory_order_relaxed);
     this->limit_ = std::pow(10.0f, std::min(0.0f, cfg.limiter_dbfs) / 20.0f);
     if (this->limit_ > 0.999f) this->limit_ = 0.999f;
   }
 
+  // Cambia solo il guadagno digitale, anche mentre l'audio scorre (usato dallo
+  // slider in HA): non tocca filtri ne' coefficienti, quindi e' sicuro da
+  // chiamare dal main loop mentre rx_task sta elaborando.
+  void set_gain_db(float db) {
+    db = std::max(-30.0f, std::min(24.0f, db));
+    this->gain_lin_.store(std::pow(10.0f, db / 20.0f), std::memory_order_relaxed);
+  }
+
   bool enabled() const {
-    return this->cfg_.highpass_hz > 0.0f || this->cfg_.presence_gain_db != 0.0f || this->cfg_.gain_db != 0.0f;
+    return this->cfg_.highpass_hz > 0.0f || this->cfg_.presence_gain_db != 0.0f ||
+           this->gain_lin_.load(std::memory_order_relaxed) != 1.0f;
   }
 
   void reset() {
@@ -131,12 +141,13 @@ class RxDsp {
   void process(int16_t *s, size_t n) {
     constexpr float kInv = 1.0f / 32768.0f;
     const float limit = this->limit_;
+    const float gain = this->gain_lin_.load(std::memory_order_relaxed);
     const float knee = 1.0f - limit;
     for (size_t i = 0; i < n; i++) {
       float x = static_cast<float>(s[i]) * kInv;
       if (this->hp_on_) x = this->hp_.process(x);
       if (this->pres_on_) x = this->pres_.process(x);
-      x *= this->gain_lin_;
+      x *= gain;
       if (this->cfg_.limiter) {
         const float a = std::fabs(x);
         if (a > limit) {
@@ -155,7 +166,7 @@ class RxDsp {
   Biquad pres_{};
   bool hp_on_{false};
   bool pres_on_{false};
-  float gain_lin_{1.0f};
+  std::atomic<float> gain_lin_{1.0f};
   float limit_{0.794f};
   uint32_t rate_{0};
 };

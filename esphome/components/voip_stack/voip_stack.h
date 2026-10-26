@@ -135,11 +135,18 @@ class VoipStack : public Component {
   // e attenua il volume (fino a quiet_attenuation_db) quando e' silenzioso.
   void set_auto_volume(float quiet_dbfs, float loud_dbfs, float quiet_attenuation_db, uint32_t measure_ms) {
     this->auto_volume_enabled_ = true;
-    this->av_quiet_dbfs_ = quiet_dbfs;
-    this->av_loud_dbfs_ = loud_dbfs;
-    this->av_att_db_ = quiet_attenuation_db;
+    this->av_quiet_dbfs_.store(quiet_dbfs, std::memory_order_relaxed);
+    this->av_loud_dbfs_.store(loud_dbfs, std::memory_order_relaxed);
+    this->av_att_db_.store(quiet_attenuation_db, std::memory_order_relaxed);
     this->noise_meter_.configure(200, measure_ms);
   }
+  // Regolazione a runtime (slider in HA via number template, vedi examples/):
+  // valori applicati subito; le soglie del volume automatico valgono dalla
+  // chiamata successiva (la misura avviene mentre squilla).
+  void set_rx_dsp_gain_db(float db) { this->rx_dsp_.set_gain_db(db); }
+  void set_auto_volume_quiet_dbfs(float v) { this->av_quiet_dbfs_.store(v, std::memory_order_relaxed); }
+  void set_auto_volume_loud_dbfs(float v) { this->av_loud_dbfs_.store(v, std::memory_order_relaxed); }
+  void set_auto_volume_attenuation_db(float v) { this->av_att_db_.store(std::max(0.0f, v), std::memory_order_relaxed); }
   // Ultimo rumore ambientale misurato (dBFS RMS, NAN se mai misurato) e
   // attenuazione applicata (dB): leggibili da lambda YAML (template sensor).
   float get_ambient_noise_dbfs() const { return this->ambient_noise_dbfs_.load(std::memory_order_relaxed); }
@@ -784,9 +791,9 @@ class VoipStack : public Component {
   voip_dsp::Biquad mic_hpf_;
   uint32_t mic_hpf_rate_{0};
   bool auto_volume_enabled_{false};
-  float av_quiet_dbfs_{-55.0f};
-  float av_loud_dbfs_{-35.0f};
-  float av_att_db_{12.0f};
+  std::atomic<float> av_quiet_dbfs_{-55.0f};
+  std::atomic<float> av_loud_dbfs_{-35.0f};
+  std::atomic<float> av_att_db_{12.0f};
   voip_dsp::NoiseMeter noise_meter_;
   uint8_t noise_phase_{0};          // 0 = in attesa, 1 = misura in corso, 2 = fatto per questa chiamata
   uint32_t last_mic_cb_ms_{0};      // per riconoscere una nuova sessione del microfono
